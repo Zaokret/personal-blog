@@ -1,0 +1,512 @@
+# How to create a multi-server discord economy bot
+
+## Single server economy bot
+
+This bot listens to reactions and messages.
+
+If a reaction is a currency emoji then we mint a currency and insert it into the wallet of message author.
+If a message is a command we execute the command. We check if the user has the permission or if application logic allows him to run this command.
+
+### Commands
+
+#### /mint
+React with a designated emoji to a user message to create a coin and insert it into wallet of message author.
+#### /transfer `@user` `amount`
+Transfer some amount of currency to another user.
+#### /wallet
+Check balanace.
+#### /top
+List top 5 users.
+#### /repost
+Repost a message into a separate channel.
+
+### Pseudocode
+
+Configuration is stored as environment variables.
+
+```ts
+type Configuration = {
+    emojiId:   string  // currency
+    channelId: string  // repost channel
+    roleId:    string  // top 5 users role
+    guildId:   string  // discord bot server
+}
+```
+
+User model and mock users. Users collection are stored into a json file.
+```ts
+type User = {
+    id:      string
+    balance: number
+}
+
+const users: User[] = JSON.parse(fs.readFile(`users.json`))
+```
+
+```json title="user.json"
+[
+    {"id": "00", "balance": 50 },
+    {"id": "01", "balance": 100},
+    {"id": "02", "balance": 25 },
+    {"id": "03", "balance": 30 },
+    {"id": "04", "balance": 1  },
+]
+```
+
+Example economy service, with user in-memory storage. We create users lazily, only when they interact with the economy.
+
+```ts
+class EconomyService {
+    users: User[];
+    constructor(users: User[]) {
+        this.users = users;
+    }
+    mint(userId: string) {
+        const user = this.users.find(user => user.id === userId)
+        if(user) {
+            user.balance++;
+        }
+        else {
+            this.users.push({
+                id: userId,
+                balance: 1
+            })
+        }
+    }
+    transfer(from: string, to: string, amount: number) {
+        if(from === to) {
+            throw Error(`You can't send currency to yourself.`)
+        }
+        const fromUser = this.users.find(user => user.id === from)
+        if(!fromUser) {
+            throw Error(`User ${from} doesn't exist and can't transfer currency.`)
+        }
+        if(fromUser.balance >= amount) {
+            fromUser.balance -= amount;
+        }
+        else {
+            throw Error(`User doesn't have enough currency to complete this transfer.`)
+        }
+        let toUser = this.users.find(user => user.id === to)
+        if(toUser) {
+            toUser.balance += amount;
+        }
+        else {
+            this.users.push({
+                id: to,
+                balance: amount
+            })
+        }
+    }
+    wallet(userId: string) {
+        const user = this.users.find(user => user.id === userId)
+        return user?.balance || 0;
+    }
+    top(count: number = 5) {
+        return this.users.sort((a,b) => b.balance - a.balance).slice(0, count)
+    }
+}
+```
+
+## Multi-server discord economy bot
+
+First step is to create a users database table from users collection. Then create guilds database table which will replace our static configuration and allow each guild to have it's own specific currency emoji, top role, repost channel and bot nickname.
+
+![2](./img/d2.png)
+
+We must now check if reaction emoji is a currency in a guild where the reaction is happening.
+```ts
+async function reactionHandler(reaction) {
+    ...
+    const currency = await db
+        .select()
+        .from(guilds)
+        .where(
+            and(
+                eq(guilds.id, reaction.guildId),
+                eq(guilds.emojiId, reaction.emoji.id)
+            )
+        )
+    ...
+}
+```
+Until now we were only checking if the `reaction.emoji.id` is the same as the environment variable.
+
+We will add new commands that guild admins will use to set currency emojis, repost channels, rich roles and bot nickname.
+
+- /set_currency_emoji `attachment` `currency name`
+- /set_repost_channel `#channel`
+- /set_top_role `@role`
+- /set_nickname `nickname`
+
+## Multi-server multi-currency discord economy bot
+
+We will now expand our bot to able to handle **multiple currencies** in the single guild and persist currencies across guilds to form a **global economy**.
+
+### Naive approach
+
+Use existing tables to add new currencies and user's wallets.
+Let's say our bot is in 2 guilds.
+
+| guild_id | nickname | currency | channel   | role     |
+|----------|----------|-------|-----------|----------|
+| 1        | broker   | ❤    | #pinned    | @amazing|
+| 2        | banker   | 💰    | #valuable  | @rich   |
+
+Guild 2 wants to add a new currency 🩲.
+
+| guild_id | nickname | currency | channel_id | role_id |
+|----------|----------|-------|------------|---------|
+| 1        | broker   | ❤    | #pinned    | @amazing |
+| 2        | banker   | 💰    | #valuable  | @rich    |
+| 2        | banker   | 🩲    | #valuable  | @rich   |
+
+We have now duplicated all the original fields of the guild 2 and only replaced the `emoji` in the new row.
+
+:::caution
+Problem happens when we want to select guilds. Now we have do it with a [sql distinct](https://www.geeksforgeeks.org/sql-distinct-clause/) operator.
+Another problem happens when a guild admin wants to update some of the guild configuration like `role` or `nickname`. Now we have to update in two places, one time for each currency row.
+:::
+
+I won't even try to create a global currency using this table because it will be very ugly.
+
+---
+
+We might also be tempted to use users table to store balance for every currency.
+
+| user | guild_id | currency | balance |
+|---------|---------|----------|----------|
+| 🧑      | 2       | 💰       | 5       |
+| 🧑      | 2       | 🩲       | 2      |
+
+This becomes confusing once our users interact with the economy from multiple guilds.
+
+| user | guild_id | currency | balance |
+|---------|---------|----------|----------|
+| 🧑      | 2       | 💰       | 5       |
+| 🧑      | 2       | 🩲       | 2      |
+| 🧑      | 1       | ❤       | 3      |
+| 🤶      | 2       | 💰       | 2       |
+| 🤶      | 2       | 🩲       | 3      |
+| 🤶      | 1       | ❤       | 4      |
+
+For the balance of a global currency `guild_id` will have to be a `null` value;
+
+:::caution
+Users table will inherit similar problems to the guilds table, because we are using our table for two purposes at the same time.
+:::
+### Better approach
+
+Separate currencies from the guilds table and separate wallets from the users table.
+
+Use foreign - primary key relationships between internal ids instead of discord ids.
+
+Distinguish between primary and secondary currencies, primary currency is used as the default transfer currency.
+
+User guild memberships is a junction table which will track what guild is a user part of.
+
+![3](./img/d3.png)
+
+Lets revisit our `EconomyService`
+
+```ts
+class EconomyService {
+    createCurrency(discordGuildId: string, currencyEmojiId: string) {
+        /* create a new currency and make it
+           primary if it's the first currency created in this guild */
+    }
+    mint(userDiscordId: string, currencyEmojiId: string) {
+        /* 1. find user by userDiscordId
+           2. find currency by currencyEmojiId
+           3. find user's wallet by user.id and currency.id
+           4. update user's wallet balance */
+    }
+    transfer(
+        discordGuildId: string,
+        fromUserDiscordId: string,
+        toUserDiscordId: string,
+        amount: number,
+        currencyEmojiId?: string
+    ) {
+        /* 1. find currency by currencyEmojiId
+              or get default currency by discordGuildId if currencyEmojiId is undefined
+           2. find users with ids fromUserDiscordId and toUserDiscordId
+           3. find wallets by user ids and currency id
+           4. validate that the sender has the correct amount of balance in his wallet
+           5. update sender and receiver wallets
+        */
+    }
+    wallet(userId: string) {
+        /* find wallets by userId */
+    }
+    top(count: number = 5) {
+        /* implemented later when exchange rates between currencies are added */
+    }
+}
+```
+
+:::caution
+Now that we are dealing with a database, where we store and update data in an asynchronous way, for one operation like transfer of currency between wallets where two wallets are updated, if the second update fails we want to reverse our first update.
+:::
+
+### Transactions and unit of work
+
+Database transactions with [drizzle orm](https://orm.drizzle.team/docs/transactions) and **unit of work** pattern.
+
+```ts
+export class UnitOfWork {
+    constructor(private context: DBContext) {}
+
+    async execute<T>(work: (repository: Repository) => Promise<T>): Promise<T | null> {
+        return this.context.transaction(async (tx) => {
+            try {
+                return await work(new Repository(tx))
+            } catch (error) {
+                tx.rollback()
+                return null
+            }
+        })
+    }
+}
+export const uow = new UnitOfWork(db)
+```
+
+Instead of injecting a `DbContext` into our `EconomyService` we inject a `UnitOfWork` and then write a execute handler which will gives us a `Repository` as an argument. `Repository` will do all CRUD operations on the `DbContext`. Outside of transactions we still use a `Repository` with the global `DbContext`.
+
+```ts
+import { repository } from 'database/repository.ts'
+
+class EconomyService {
+    uow: UnitOfWork;
+    constructor(uow: UnitOfWork) {
+        this.uow = uow;
+    }
+    ...
+    // this example lacks error handling
+    async transfer(
+        discordGuildId: string,
+        fromUserDiscordId: string,
+        toUserDiscordId: string,
+        amount: number,
+        currencyEmojiId?: string
+    ) {
+        const currency = currencyEmojiId
+            ? repository.getCurrency(currencyEmojiId)
+            : repository.getPrimaryCurrency(disocrdGuildId)
+        const sender = await repository.getUser(fromUserDiscordId)
+        const senderWallet = await repository.getWallet(sender.id, currency.id)
+        if(senderWallet.balance >= amount) {
+            this.uow.execute(tx => {
+                const receiver = await this.tx.getOrCreateUser(toUserDiscordId)
+                const receiverWallet = await this.tx.getOrCreateWallet(receiver.id, currency.id)
+                senderWallet.balance -= amount
+                receiverWallet.balance += amount
+                await this.tx.updateWallets([senderWallet, receiverWallet])
+            })
+        }
+        else {
+            throw Error(`User ${sender.id} doesn't have enough currency ${currency.id} to complete this transfer.`)
+        }
+
+    }
+    ...
+}
+
+```
+
+Now that we can have many currencies inside of a single guild, lets allow users to exchange one for another one by an exchange rate set by the guild admin.
+
+![4](./img/d4.png)
+
+One of our goals was to have a global economy. That would require a currency to be available in multiple guilds.
+
+To achieve this I created a `groups` and `guild group membership` table, and changed `currencies` table foreign key from `guild_id` to `group_id`.
+
+![5](./img/d5.png)
+
+### Group types
+
+#### global - global economy
+Currencies that belong to the global group persist across guilds and can earned in each guild that is part of the global group.
+
+Admin is the developer, only the developer can create global currencies and their exchange rates.
+
+#### local - local economy
+Out of the scope of this guide.
+
+#### single - isolated economy
+Every guild is part of a it's own "single" group, and each currency that is bound to the guild's "single" group is isolated from other guilds.
+Admin is the guild admin.
+
+:::info
+Only the currencies of the same group can be exchanged for simplicity sake.
+:::
+---
+
+
+We can no longer wait for users to interact with the economy to create them in our user's table. Certain work has to been done every time our bot is accepted into a guild.
+
+```ts
+...
+async addedToGuild(guild) {
+      const commands = await getCommands()
+      await deployCommands(guild.id, commands)
+      const entity = await guildService.getOrCreateGuild(guild.id)
+      const members = await fetchAllMembers(guild.id)
+      await repository.addUserGuildMemberships(members, entity.id)
+}
+...
+```
+
+### Fetch all members of a guild
+
+Fetching all guild members must be done in batches of max a 1000 users and the maximum number of guild members is 1,000,000
+
+```ts
+export const rest = new REST().setToken(token)
+
+export async function fetchAllMembers(guildId: string) {
+  const query = new URLSearchParams()
+  query.set("limit", "1000")
+
+  let members: string[] = []
+  let batch: Collection<string, GuildMember> = new Collection()
+  do {
+    if (members.length > 0) {
+      query.set("after", members.at(-1))
+    }
+    const batch = (await rest.get(`/guilds/${guildId}/members`, {
+      query,
+    })) as Array<GuildMember>
+    members.push(...batch.map((member) => member.user.id))
+  } while (batch.size > 0)
+
+  return members
+}
+```
+---
+We need new commands to allow group admins to manage these new parts of the economy
+
+- /currencies
+- /make_currency_primary `:currency_emoji_name:`
+- /create_exchange_rate `:from_currency:` `:to_currency:` `rate`
+- /exchange `:from_currency:` `:to_currency:` `amount`
+- /transfer `@user` `amount` `?:currency:`
+- /join_global_group
+
+### Joining a global group
+
+When a guild joins a global group we must install all the global currencies in that guild.
+```ts
+async joinGlobalGroup(discordGuildId: string) {
+    const guild = await repository.getGuildByDiscordGuildId(discordGuildId)
+    await repository.createGuildMembership({
+      groupId: globalGroupId,
+      guildId: guild.id,
+    })
+
+    const currencies = await repository.getCurrenciesByGroupId(globalGroupId)
+      const emojis = await Promise.all(
+        currencies.map((currency) =>
+          fetch(rest.cdn.emoji(currency.discordEmojiId))
+            .then((response) => response.arrayBuffer())
+            .then((buffer) => createEmoji(guild.discordGuildId, currency.name, buffer))
+        )
+      )
+}
+```
+---
+### Leaderboard
+Now we can implement our top 5 for users of a guild.
+
+It will sum all user wallets that can be directly exchanged to the target currency.
+
+```ts
+async top5(discordGuildId: string, currencyId?: number | undefined) {
+    let currency = currencyId
+      ? await repository.getCurrencyById(currencyId)
+      : await this.getDefaultTransferCurrencyForGuild(discordGuildId)
+
+    const guildUsers = await db
+      .select({
+        discordId: users.discordId,
+        count: sql`
+            SUM(
+                CASE
+                    WHEN ${wallets.currencyId} = ${currencyId}
+                        THEN CAST(${wallets.count} AS NUMERIC)
+                    WHEN ${exchangeRates.quoteCurrencyId} = ${currencyId}
+                        THEN CAST(${wallets.count} AS NUMERIC) * CAST(${exchangeRates.rate} AS NUMERIC)
+                    ELSE 0
+                END
+            )`.mapWith(Number).as("count"),
+      })
+      .from(users)
+      .innerJoin(userGuildMemberships, eq(userGuildMemberships.userId, users.id))
+      .innerJoin(guilds, eq(guilds.id, userGuildMemberships.guildId))
+      .innerJoin(wallets, eq(wallets.userId, users.id))
+      .innerJoin(currencies, eq(currencies.id, wallets.currencyId))
+      .leftJoin(exchangeRates, eq(exchangeRates.baseCurrencyId, currencies.id))
+      .where(
+        and(
+          currency.groupId === null
+            ? isNull(currencies.groupId)
+            : eq(currencies.groupId, currency.groupId),
+          eq(guilds.discordGuildId, discordGuildId)
+        )
+      )
+      .groupBy(users.discordId)
+      .orderBy(({ count }) => desc(count))
+      .limit(5)
+
+    return { top: guildUsers, currency: currency }
+  }
+```
+---
+### Audit
+
+To track the history of all economy activity we can create an audit table with all transactions like:
+
+- minting
+- burning
+- exchanges
+- transfers
+
+When some of these actions happen we will create a audit object, add it to the queue and that queue will be persisted to memory every minute. That way we batch our inserts and prevent overwhelming the database.
+
+```ts
+class Queue<T> {
+  private array: T[] = []
+  constructor() {}
+  add(...items: T[]) {
+    this.array.unshift(...items)
+  }
+  pull(count: number): T[] {
+    let start = this.array.length - count
+    return this.array.splice(start < 0 ? 0 : start, count)
+  }
+  all(): ReadonlyArray<T> {
+    return this.array as ReadonlyArray<T>
+  }
+  get length(): number {
+    return this.array.length
+  }
+}
+
+export const transactionQueue = new Queue<Transaction>()
+
+// insert 1000 transactions from the queue every minute
+// if there is more than a 1000 transactions send an alert to a discord channel
+setInterval(() => {
+  const batch = transactionQueue.pull(1000)
+  if (batch.length > 0) {
+    db.insert(transactions)
+      .values(batch)
+      .catch((err) => {
+        // on error return the batch to the queue
+        transactionQueue.add(...batch)
+      })
+  }
+}, 60 * 1000)
+```
+
