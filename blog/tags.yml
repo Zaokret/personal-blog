@@ -1,19 +1,5 @@
-facebook:
-  label: Facebook
-  permalink: /facebook
-  description: Facebook tag description
+discord:
+  label: Discord
+  permalink: /discord
+  description: Social media network for gamers.
 
-hello:
-  label: Hello
-  permalink: /hello
-  description: Hello tag description
-
-docusaurus:
-  label: Docusaurus
-  permalink: /docusaurus
-  description: Docusaurus tag description
-
-hola:
-  label: Hola
-  permalink: /hola
-  description: Hola tag description

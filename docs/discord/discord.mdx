@@ -1,24 +1,31 @@
 # How to create a multi-server discord economy bot
 
+## Intro
+
+I will be referencing these libraries and technologies in the article
+- [node.js](https://nodejs.org)
+- [discord.js](https://discord.js.org/docs)
+- [typescript](https://www.typescriptlang.org)
+- [drizzle orm](https://orm.drizzle.team)
+
 ## Single server economy bot
 
 This bot listens to reactions and messages.
 
-If a reaction is a currency emoji then we mint a currency and insert it into the wallet of message author.
+If a reaction is a currency emoji then we mint a currency and insert it into the wallet of the message author.
+
 If a message is a command we execute the command. We check if the user has the permission or if application logic allows him to run this command.
 
 ### Commands
 
 #### /mint
-React with a designated emoji to a user message to create a coin and insert it into wallet of message author.
+React with a designated emoji to a user message to create a currency token and insert it into wallet of the message author.
 #### /transfer `@user` `amount`
 Transfer some amount of currency to another user.
 #### /wallet
 Check balanace.
 #### /top
 List top 5 users.
-#### /repost
-Repost a message into a separate channel.
 
 ### Pseudocode
 
@@ -27,13 +34,12 @@ Configuration is stored as environment variables.
 ```ts
 type Configuration = {
     emojiId:   string  // currency
-    channelId: string  // repost channel
     roleId:    string  // top 5 users role
     guildId:   string  // discord bot server
 }
 ```
 
-User model and mock users. Users collection are stored into a json file.
+User model and mock users. Users collection is stored into a json file.
 ```ts
 type User = {
     id:      string
@@ -53,7 +59,7 @@ const users: User[] = JSON.parse(fs.readFile(`users.json`))
 ]
 ```
 
-Example economy service, with user in-memory storage. We create users lazily, only when they interact with the economy.
+Example `EconomyService`, with user in-memory storage. We create users lazily, only when they interact with the economy.
 
 ```ts
 class EconomyService {
@@ -110,15 +116,15 @@ class EconomyService {
 
 ## Multi-server discord economy bot
 
-First step is to create a users database table from users collection. Then create guilds database table which will replace our static configuration and allow each guild to have it's own specific currency emoji, top role, repost channel and bot nickname.
+First step is to create a users database table from users collection. Then create guilds database table which will replace our static configuration and allow each guild to have it's own specific currency emoji, top role and bot nickname.
 
 ![2](./img/d2.png)
 
 We must now check if reaction emoji is a currency in a guild where the reaction is happening.
 ```ts
-async function reactionHandler(reaction) {
-    ...
-    const currency = await db
+// Repository
+async function getCurrency(guildId, emojiId) {
+    const result = await db
         .select()
         .from(guilds)
         .where(
@@ -127,21 +133,34 @@ async function reactionHandler(reaction) {
                 eq(guilds.emojiId, reaction.emoji.id)
             )
         )
+    if(result.length > 0) {
+        return result[0]
+    }
+    return null
+}
+
+async function reactionHandler(reaction) {
+    ...
+    const currency = await repository.getCurrency(reaction.guildId, reaction.emoji.id)
     ...
 }
 ```
 Until now we were only checking if the `reaction.emoji.id` is the same as the environment variable.
 
-We will add new commands that guild admins will use to set currency emojis, repost channels, rich roles and bot nickname.
+We will add new commands that guild admins will use to set currency emojis, rich roles and bot nickname.
 
-- /set_currency_emoji `attachment` `currency name`
+- /set_currency_emoji `file_attachment` `currency name`
 - /set_repost_channel `#channel`
 - /set_top_role `@role`
 - /set_nickname `nickname`
 
+:::info
+Checkout available [slash commands argument option types](https://discordjs.guide/slash-commands/advanced-creation.html#option-types).
+:::
+
 ## Multi-server multi-currency discord economy bot
 
-We will now expand our bot to able to handle **multiple currencies** in the single guild and persist currencies across guilds to form a **global economy**.
+We will now expand our bot to able to handle **multiple currencies** in the single guild and persist currencies across guilds to form a **global economy** in which users can trade between guilds.
 
 ### Naive approach
 
@@ -149,30 +168,30 @@ Use existing tables to add new currencies and user's wallets.
 Let's say our bot is in 2 guilds.
 
 | guild_id | nickname | currency | channel   | role     |
-|----------|----------|-------|-----------|----------|
-| 1        | broker   | ❤    | #pinned    | @amazing|
-| 2        | banker   | 💰    | #valuable  | @rich   |
+|----------|----------|----------|-----------|----------|
+| 1        | broker   | ❤       | #pinned    | @amazing|
+| 2        | banker   | 💰       | #valuable  | @rich   |
 
 Guild 2 wants to add a new currency 🩲.
 
 | guild_id | nickname | currency | channel_id | role_id |
-|----------|----------|-------|------------|---------|
-| 1        | broker   | ❤    | #pinned    | @amazing |
-| 2        | banker   | 💰    | #valuable  | @rich    |
-| 2        | banker   | 🩲    | #valuable  | @rich   |
+|----------|----------|----------|------------|---------|
+| 1        | broker   | ❤       | #pinned    | @amazing |
+| 2        | banker   | 💰       | #valuable  | @rich    |
+| 2        | banker   | 🩲       | #valuable  | @rich    |
 
 We have now duplicated all the original fields of the guild 2 and only replaced the `emoji` in the new row.
 
 :::caution
-Problem happens when we want to select guilds. Now we have do it with a [sql distinct](https://www.geeksforgeeks.org/sql-distinct-clause/) operator.
-Another problem happens when a guild admin wants to update some of the guild configuration like `role` or `nickname`. Now we have to update in two places, one time for each currency row.
+Problem happens when we want to get all guilds. Now we have do it with a [sql distinct](https://www.geeksforgeeks.org/sql-distinct-clause/) operator.
+Another problem happens when a guild admin wants to update some of the guild configuration like `role` or `nickname`. Now we have to update in two places, one time for each currency.
 :::
 
 I won't even try to create a global currency using this table because it will be very ugly.
 
 ---
 
-We might also be tempted to use users table to store balance for every currency.
+We might also be tempted to use users table to store currency balance.
 
 | user | guild_id | currency | balance |
 |---------|---------|----------|----------|
@@ -182,19 +201,20 @@ We might also be tempted to use users table to store balance for every currency.
 This becomes confusing once our users interact with the economy from multiple guilds.
 
 | user | guild_id | currency | balance |
-|---------|---------|----------|----------|
-| 🧑      | 2       | 💰       | 5       |
-| 🧑      | 2       | 🩲       | 2      |
-| 🧑      | 1       | ❤       | 3      |
-| 🤶      | 2       | 💰       | 2       |
-| 🤶      | 2       | 🩲       | 3      |
-| 🤶      | 1       | ❤       | 4      |
+|------|----------|----------|---------|
+| 🧑   | 2        | 💰       | 5       |
+| 🧑   | 2        | 🩲       | 2      |
+| 🧑   | 1        | ❤        | 3       |
+| 🤶   | 2        | 💰       | 2       |
+| 🤶   | 2        | 🩲       | 3      |
+| 🤶   | 1        | ❤       | 4       |
 
-For the balance of a global currency `guild_id` will have to be a `null` value;
+For the balance of a global currency - `guild_id` will have to be a `null` value.
 
 :::caution
-Users table will inherit similar problems to the guilds table, because we are using our table for two purposes at the same time.
+Users table will inherit similar problems to the guilds table, because we are using our tables for two purposes at the same time.
 :::
+
 ### Better approach
 
 Separate currencies from the guilds table and separate wallets from the users table.
@@ -203,7 +223,7 @@ Use foreign - primary key relationships between internal ids instead of discord 
 
 Distinguish between primary and secondary currencies, primary currency is used as the default transfer currency.
 
-User guild memberships is a junction table which will track what guild is a user part of.
+User guild memberships is a junction table which will track which guild is user a part of.
 
 ![3](./img/d3.png)
 
@@ -246,7 +266,9 @@ class EconomyService {
 ```
 
 :::caution
-Now that we are dealing with a database, where we store and update data in an asynchronous way, for one operation like transfer of currency between wallets where two wallets are updated, if the second update fails we want to reverse our first update.
+Now that we are dealing with a database, where we store and update data in an asynchronous way,
+for one command like transfer which requires multiple updates to the database,
+and if any updates fail we'll want to reverse previous updates.
 :::
 
 ### Transactions and unit of work
@@ -262,6 +284,7 @@ export class UnitOfWork {
             try {
                 return await work(new Repository(tx))
             } catch (error) {
+                console.error(error)
                 tx.rollback()
                 return null
             }
@@ -296,6 +319,7 @@ class EconomyService {
         const sender = await repository.getUser(fromUserDiscordId)
         const senderWallet = await repository.getWallet(sender.id, currency.id)
         if(senderWallet.balance >= amount) {
+            // if any of the create or update methods inside this transaction fail, UnitOfWork will rollback them all of them
             this.uow.execute(tx => {
                 const receiver = await this.tx.getOrCreateUser(toUserDiscordId)
                 const receiverWallet = await this.tx.getOrCreateWallet(receiver.id, currency.id)
@@ -332,7 +356,9 @@ Currencies that belong to the global group persist across guilds and can earned 
 Admin is the developer, only the developer can create global currencies and their exchange rates.
 
 #### local - local economy
-Out of the scope of this guide.
+A guilds which share a currency in their local group.
+
+Out of the scope for this guide.
 
 #### single - isolated economy
 Every guild is part of a it's own "single" group, and each currency that is bound to the guild's "single" group is isolated from other guilds.
@@ -344,11 +370,13 @@ Only the currencies of the same group can be exchanged for simplicity sake.
 ---
 
 
-We can no longer wait for users to interact with the economy to create them in our user's table. Certain work has to been done every time our bot is accepted into a guild.
+We can no longer wait for users to interact with the economy to create them in our user's table.
+Certain work has to been done every time our bot is accepted into a guild.
+A user could have the most amount of global currency in a new guild that he has joined, but will not show in the leaderboards of that guild because he didn't yet interact with the economy from inside of that guild.
 
 ```ts
 ...
-async addedToGuild(guild) {
+async botAddedToGuild(guild) {
       const commands = await getCommands()
       await deployCommands(guild.id, commands)
       const entity = await guildService.getOrCreateGuild(guild.id)
@@ -377,7 +405,7 @@ export async function fetchAllMembers(guildId: string) {
     }
     const batch = (await rest.get(`/guilds/${guildId}/members`, {
       query,
-    })) as Array<GuildMember>
+    })) as GuildMember[]
     members.push(...batch.map((member) => member.user.id))
   } while (batch.size > 0)
 
@@ -393,10 +421,10 @@ We need new commands to allow group admins to manage these new parts of the econ
 - /exchange `:from_currency:` `:to_currency:` `amount`
 - /transfer `@user` `amount` `?:currency:`
 - /join_global_group
-
+---
 ### Joining a global group
 
-When a guild joins a global group we must install all the global currencies in that guild.
+When a guild joins a global guild group we must install all the global currencies in that guild. We install them using the [discord.js REST API client](https://discord.js.org/docs/packages/rest/main).
 ```ts
 async joinGlobalGroup(discordGuildId: string) {
     const guild = await repository.getGuildByDiscordGuildId(discordGuildId)
@@ -414,10 +442,66 @@ async joinGlobalGroup(discordGuildId: string) {
         )
       )
 }
+
 ```
----
+### Trade across guilds through a master guild or with bank notes
+
+Currently users can trade their global currencies only if they are part of the same guild. We could refer all users wanting to trade in the global economy to the single "**master**" guild which could serve as a global marketplace.
+
+Let's create a way for users to transfer currency even if they're not a part of the same guild using "**bank notes**".
+
+Bank note should be a one-time consumable, secure and transparent object that is signed over to the a single recepient.  It should be self-contained and sharable as text.
+
+Bank note trade flow goes like this:
+
+1. Sender [copies id of the discord user](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID#h_01HRSTXPS5H5D7JBY2QKKPVKNA) he wants to share this bank note to.
+2. Sender issues a command to the discord bot to create a bank note which contains recepient discord id and some amount of currency.
+3. Sender receives a token that he sends to the recepient in discord chat.
+4. Recepient has a permanently valid bank note which he can consume at any point by issuing a command to the bot. He will need to be in a server which has our bot present, but doesn't have to be in the same server as the sender.
+
+[JWT Web Token](https://jwt.io) has these properties so we will use it's mechanism for our bank notes.
+
+Encoded token with 3 parts separated by a dot.
+`eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjdXJyZW5jeUlkIjoxLCJhbW91bnQiOjEsImp0aSI6Ijg5MGZjOTQ5LTBkMWMtNDdiZi05NjA5LTg5ZDg0NzMyMDYzOCIsInJlY2lwaWVudElkIjoiNTYzNDM3MzQ3ODk5OTY1NDU1In0.AinV8D0nPOtMvrdydrPi64F77U1dJ9GIcp3DuzYO_04`
+
+Decoded JWT token has 3 parts
+
+Identifies which algorithm is used to generate the signature. In the below example, (HS256)[https://en.wikipedia.org/wiki/SHA-2] indicates that this token is signed using HMAC-SHA256.
+```json title="header"
+{
+  "alg": "HS256",
+  "typ": "JWT"
+}
+```
+Describes our bank note.
+```json title="payload"
+{
+  "currencyId": 1,        // currency primary id key
+  "amount": 1,            // fixed amount of currency
+  "jti": "asdfgh",        // unique id
+  "recipientId": "12345"  // discord user id
+}
+```
+Securely validates the token. The signature is calculated by encoding the header and payload using [Base64url Encoding](https://en.wikipedia.org/wiki/Base64#URL_applications) [RFC 4648](https://datatracker.ietf.org/doc/html/rfc4648) and concatenating the two together with a period separator. That string is then run through the cryptographic algorithm specified in the header.
+```ts title="verify signature"
+const token = base64urlEncoding(header)
++ '.' + base64urlEncoding(payload)
++ '.' + base64urlEncoding(signature)
+```
+
+Bank note **can be consumed only once**.
+We will create a new database table which will hold all bank notes, with a column indicating if the bank note has been consumed or not.
+
+![6](./img/d6.png)
+
+Bank note is **transparent** because anyone can decode it to see the payload that contains the amount, currency and recepient.
+
+Bank note is **secure** because it becomes invalid if the payload has been altered in any way.
+
+Bank note **can be consumed only by a single discord user** choosen by the sender at the time when the bank note was created.
+
 ### Leaderboard
-Now we can implement our top 5 for users of a guild.
+Now we can implement our top 5 leaderboard for users of a guild.
 
 It will sum all user wallets that can be directly exchanged to the target currency.
 
@@ -462,15 +546,17 @@ async top5(discordGuildId: string, currencyId?: number | undefined) {
     return { top: guildUsers, currency: currency }
   }
 ```
----
+
 ### Audit
 
-To track the history of all economy activity we can create an audit table with all transactions like:
+To track the history of all economy activity we can create an audit table filled with events that are marked with these types:
 
 - minting
 - burning
 - exchanges
 - transfers
+- create bank note
+- consume bank note
 
 When some of these actions happen we will create a audit object, add it to the queue and that queue will be persisted to memory every minute. That way we batch our inserts and prevent overwhelming the database.
 
