@@ -62,7 +62,7 @@ const config: Config = {
 
   themeConfig: {
     // Replace with your project's social card
-    image: 'img/docusaurus-social-card.jpg',
+    image: '#',
     navbar: {
       title: 'Lazar\'s Blog',
       logo: {
@@ -118,7 +118,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} My Project, Inc. Built with Docusaurus.`,
+      copyright: `Copyright © ${new Date().getFullYear()} Lazar Todorovic, Inc. Built with Docusaurus.`,
     },
     prism: {
       theme: prismThemes.github,
