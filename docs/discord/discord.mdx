@@ -1,3 +1,7 @@
+---
+sidebar_position: 1
+---
+
 # How to create a multi-server discord economy bot
 
 ## Intro
@@ -119,33 +123,6 @@ class EconomyService {
 First step is to create a users database table from users collection. Then create guilds database table which will replace our static configuration and allow each guild to have it's own specific currency emoji, top role and bot nickname.
 
 ![2](./img/d2.png)
-
-We must now check if reaction emoji is a currency in a guild where the reaction is happening.
-```ts
-// Repository
-async function getCurrency(guildId, emojiId) {
-    const result = await db
-        .select()
-        .from(guilds)
-        .where(
-            and(
-                eq(guilds.id, reaction.guildId),
-                eq(guilds.emojiId, reaction.emoji.id)
-            )
-        )
-    if(result.length > 0) {
-        return result[0]
-    }
-    return null
-}
-
-async function reactionHandler(reaction) {
-    ...
-    const currency = await repository.getCurrency(reaction.guildId, reaction.emoji.id)
-    ...
-}
-```
-Until now we were only checking if the `reaction.emoji.id` is the same as the environment variable.
 
 We will add new commands that guild admins will use to set currency emojis, rich roles and bot nickname.
 
@@ -596,3 +573,4 @@ setInterval(() => {
 }, 60 * 1000)
 ```
 
+Learn how I made these database diagrams [HERE](/docs/diagrams).
