@@ -20,7 +20,7 @@ function HomepageHeader() {
           <Link
             className="button button--secondary button--lg"
             to="/docs/discord">
-            Multi-server discord economy bot - 10min ⏱️
+            Multi-server discord economy bot - 25min ⏱️
           </Link>
         </div>
       </div>

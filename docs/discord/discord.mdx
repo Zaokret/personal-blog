@@ -141,7 +141,7 @@ We will now expand our bot to able to handle **multiple currencies** in the sing
 
 ### Naive approach
 
-Use existing tables to add new currencies and user's wallets.
+Is to use existing tables to add new currencies and user wallets.
 Let's say our bot is in 2 guilds.
 
 | guild_id | nickname | currency | channel   | role     |
@@ -150,14 +150,13 @@ Let's say our bot is in 2 guilds.
 | 2        | banker   | 💰       | #valuable  | @rich   |
 
 Guild 2 wants to add a new currency 🩲.
+We have now duplicated all the original fields of the guild 2 and only replaced the `emoji` in the new row.
 
 | guild_id | nickname | currency | channel_id | role_id |
 |----------|----------|----------|------------|---------|
 | 1        | broker   | ❤       | #pinned    | @amazing |
 | 2        | banker   | 💰       | #valuable  | @rich    |
 | 2        | banker   | 🩲       | #valuable  | @rich    |
-
-We have now duplicated all the original fields of the guild 2 and only replaced the `emoji` in the new row.
 
 :::caution
 Problem happens when we want to get all guilds. Now we have do it with a [sql distinct](https://www.geeksforgeeks.org/sql-distinct-clause/) operator.
@@ -200,7 +199,7 @@ Use foreign - primary key relationships between internal ids instead of discord 
 
 Distinguish between primary and secondary currencies, primary currency is used as the default transfer currency.
 
-User guild memberships is a junction table which will track which guild is user a part of.
+User guild memberships is added as a junction table which will track which guild is user a part of.
 
 ![3](./img/d3.png)
 
@@ -243,14 +242,14 @@ class EconomyService {
 ```
 
 :::caution
-Now that we are dealing with a database, where we store and update data in an asynchronous way,
-for one command like transfer which requires multiple updates to the database,
-and if any updates fail we'll want to reverse previous updates.
+Now that we are dealing with a database,
+where a single command like transfer requires multiple updates to it,
+if any update fail we'll want to reverse all other updates.
 :::
 
 ### Transactions and unit of work
 
-Database transactions with [drizzle orm](https://orm.drizzle.team/docs/transactions) and **unit of work** pattern.
+Reversable updates with [database transactions](https://orm.drizzle.team/docs/transactions) and **unit of work** pattern.
 
 ```ts
 export class UnitOfWork {
@@ -271,7 +270,8 @@ export class UnitOfWork {
 export const uow = new UnitOfWork(db)
 ```
 
-Instead of injecting a `DbContext` into our `EconomyService` we inject a `UnitOfWork` and then write a execute handler which will gives us a `Repository` as an argument. `Repository` will do all CRUD operations on the `DbContext`. Outside of transactions we still use a `Repository` with the global `DbContext`.
+Instead of injecting a `DbContext` into our `EconomyService` we inject a `UnitOfWork` and then write a execute handler which will gives us a `Repository` as an argument.
+`Repository` will do all CRUD operations on the `DbContext`. Outside of transactions we still use a `Repository` with the global `DbContext`.
 
 ```ts
 import { repository } from 'database/repository.ts'
@@ -296,7 +296,8 @@ class EconomyService {
         const sender = await repository.getUser(fromUserDiscordId)
         const senderWallet = await repository.getWallet(sender.id, currency.id)
         if(senderWallet.balance >= amount) {
-            // if any of the create or update methods inside this transaction fail, UnitOfWork will rollback them all of them
+            /* if any of the create or update methods inside this transaction fail,
+               UnitOfWork will rollback all of them */
             this.uow.execute(tx => {
                 const receiver = await this.tx.getOrCreateUser(toUserDiscordId)
                 const receiverWallet = await this.tx.getOrCreateWallet(receiver.id, currency.id)
@@ -315,25 +316,30 @@ class EconomyService {
 
 ```
 
-Now that we can have many currencies inside of a single guild, lets allow users to exchange one for another one by an exchange rate set by the guild admin.
+Now that we can have many currencies inside of a single guild, lets allow users to exchange one currency for another by an exchange rate set by the guild admin.
+Exchange rate is an entity which describes an exchange of two currencies in single direction. From the base curency to the quote currency.
 
 ![4](./img/d4.png)
 
-One of our goals was to have a global economy. That would require a currency to be available in multiple guilds.
+One of bot goals was to allow trading between guilds in a global economy.
 
-To achieve this I created a `groups` and `guild group membership` table, and changed `currencies` table foreign key from `guild_id` to `group_id`.
+To achieve this we'll need created a `groups` and `guild group membership` table.
+Groups table will "group" multiple guilds together through a junction table.
+If we bind our currencies to groups instead of guilds we could have global and local currencies.
 
 ![5](./img/d5.png)
 
 ### Group types
 
+We will have one "global" group, one "single" group per guild and variable amount of "local" groups of guilds.
+
 #### global - global economy
 Currencies that belong to the global group persist across guilds and can earned in each guild that is part of the global group.
 
-Admin is the developer, only the developer can create global currencies and their exchange rates.
+Admin is the developer, who can create global currencies and their exchange rates.
 
 #### local - local economy
-A guilds which share a currency in their local group.
+A guilds which share group that has a currencies bound to that group.
 
 Out of the scope for this guide.
 
@@ -344,12 +350,12 @@ Admin is the guild admin.
 :::info
 Only the currencies of the same group can be exchanged for simplicity sake.
 :::
----
 
+### Fetch all members of a guild
 
 We can no longer wait for users to interact with the economy to create them in our user's table.
 Certain work has to been done every time our bot is accepted into a guild.
-A user could have the most amount of global currency in a new guild that he has joined, but will not show in the leaderboards of that guild because he didn't yet interact with the economy from inside of that guild.
+This is because a user could have the most amount of global currency in a new guild that he has joined, but will not show in the leaderboards of that guild because he didn't yet interact with the economy from inside of that guild.
 
 ```ts
 ...
@@ -362,8 +368,6 @@ async botAddedToGuild(guild) {
 }
 ...
 ```
-
-### Fetch all members of a guild
 
 Fetching all guild members must be done in batches of max a 1000 users and the maximum number of guild members is 1,000,000
 
@@ -438,10 +442,10 @@ Bank note trade flow goes like this:
 
 [JWT Web Token](https://jwt.io) has these properties so we will use it's mechanism for our bank notes.
 
-Encoded token with 3 parts separated by a dot.
+This is how an encoded JWT token looks like
 `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjdXJyZW5jeUlkIjoxLCJhbW91bnQiOjEsImp0aSI6Ijg5MGZjOTQ5LTBkMWMtNDdiZi05NjA5LTg5ZDg0NzMyMDYzOCIsInJlY2lwaWVudElkIjoiNTYzNDM3MzQ3ODk5OTY1NDU1In0.AinV8D0nPOtMvrdydrPi64F77U1dJ9GIcp3DuzYO_04`
 
-Decoded JWT token has 3 parts
+When we decoded it 3 parts are revealed
 
 1. Identifies which algorithm is used to generate the signature. In the below example, [HS256](https://en.wikipedia.org/wiki/SHA-2) indicates that this token is signed using HMAC-SHA256.
 ```json title="header"
@@ -459,15 +463,16 @@ Decoded JWT token has 3 parts
   "recipientId": "12345"  // discord user id
 }
 ```
-3. Securely validates the token. The signature is calculated by encoding the header and payload using [Base64url Encoding](https://en.wikipedia.org/wiki/Base64#URL_applications) [RFC 4648](https://datatracker.ietf.org/doc/html/rfc4648) and concatenating the two together with a period separator. That string is then run through the cryptographic algorithm specified in the header.
+3. The signature that allows a recipient to verify that the token was signed correctly and hasn’t been tampered with. The signature is calculated by encoding the header and payload using [Base64url Encoding](https://en.wikipedia.org/wiki/Base64#URL_applications) [RFC 4648](https://datatracker.ietf.org/doc/html/rfc4648) and concatenating the two together with a period separator. That string is then run through the cryptographic algorithm specified in the header.
 ```ts title="verify signature"
-const token = base64urlEncoding(header)
-+ '.' + base64urlEncoding(payload)
-+ '.' + base64urlEncoding(signature)
+const secretKey = 'static_string_stored_on_as_an_environment_variable'
+const encoding = base64urlEncode(header) + '.' + base64urlEncode(payload);
+const signature = HMAC_SHA256(encoding, secretKey);
+const thirdPartOfToken = base64urlEncode(signature);
 ```
 
 Bank note **can be consumed only once**.
-We will create a new database table which will hold all bank notes, with a column indicating if the bank note has been consumed or not.
+We will need a new database table which will hold all bank notes, with a column indicating if the bank note has been consumed or not.
 
 ![6](./img/d6.png)
 
@@ -535,7 +540,9 @@ To track the history of all economy activity we can create an audit table filled
 - create bank note
 - consume bank note
 
-When some of these actions happen we will create a audit object, add it to the queue and that queue will be persisted to memory every minute. That way we batch our inserts and prevent overwhelming the database.
+When some of these actions happen we will create a audit object,
+add it to the queue and that queue will be persisted to the database every minute.
+That way we batch our inserts and prevent overwhelming the database.
 
 ```ts
 class Queue<T> {
@@ -572,5 +579,3 @@ setInterval(() => {
   }
 }, 60 * 1000)
 ```
-
-Learn how I made these database diagrams [HERE](/docs/diagrams).
